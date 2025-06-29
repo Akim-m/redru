@@ -35,7 +35,7 @@ A simple yet extensible in-memory key-value database written in Rust with:
 ### 1. Clone the Repository
 
 ```
-git clone https://github.com/your-username/your-repo-name.git
+git clone https://github.com/Akim-m/redru
 cd your-repo-name
 ```
 
