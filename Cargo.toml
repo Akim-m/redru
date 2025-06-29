@@ -1,0 +1,15 @@
+[package]
+name = "geng"
+version = "0.1.0"
+edition = "2024"
+
+
+[dependencies]
+serde = {version="*",features=["derive"]}
+serde_json = "*"
+
+[dev-dependencies]
+tempfile="*"
+
+[build]
+target-dir="target"
