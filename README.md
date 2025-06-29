@@ -78,7 +78,7 @@ Inside the interactive shell, you can use the following commands:
 ├── db.rs           # Core in-memory database implementation
 ├── hash_index.rs   # Hash index logic
 ├── Cargo.toml      # Rust package configuration
-└── database.json   # (Generated) Persistent storage file
+
 ```
 
 ---
