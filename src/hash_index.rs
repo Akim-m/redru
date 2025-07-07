@@ -271,6 +271,69 @@ impl HashIndex {
         }
         Ok(())
     }
+
+    /// Find keys where a field contains a substring (case-insensitive, for String fields)
+    pub fn find_partial(&self, index_name: &str, field: &str, substring: &str, storage: &HashMap<String, Value>) -> Vec<String> {
+        let mut results = Vec::new();
+        let substring = substring.to_lowercase();
+        for (key, value) in storage {
+            if let Some(field_value) = crate::hash_index::extract_field_value(value, field) {
+                if let Some(s) = field_value.as_str() {
+                    if s.to_lowercase().contains(&substring) {
+                        results.push(key.clone());
+                    }
+                }
+            }
+        }
+        results
+    }
+
+    /// Find keys where a numeric field is within a range (inclusive)
+    pub fn find_range(&self, index_name: &str, field: &str, min: f64, max: f64, storage: &HashMap<String, Value>) -> Vec<String> {
+        let mut results = Vec::new();
+        for (key, value) in storage {
+            if let Some(field_value) = crate::hash_index::extract_field_value(value, field) {
+                if let Some(n) = field_value.as_f64() {
+                    if n >= min && n <= max {
+                        results.push(key.clone());
+                    }
+                }
+            }
+        }
+        results
+    }
+
+    /// Find keys where multiple fields match specified values (all must match)
+    pub fn find_multi(&self, index_name: &str, field_values: &[(String, Value)], storage: &HashMap<String, Value>) -> Vec<String> {
+        let mut results = Vec::new();
+        'outer: for (key, value) in storage {
+            for (field, expected) in field_values {
+                if let Some(field_value) = crate::hash_index::extract_field_value(value, field) {
+                    if field_value != expected {
+                        continue 'outer;
+                    }
+                } else {
+                    continue 'outer;
+                }
+            }
+            results.push(key.clone());
+        }
+        results
+    }
+
+    /// List all unique values for a given field in an index
+    pub fn list_field_values(&self, index_name: &str, field: &str, storage: &HashMap<String, Value>) -> Vec<Value> {
+        let mut values = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for value in storage.values() {
+            if let Some(field_value) = crate::hash_index::extract_field_value(value, field) {
+                if seen.insert(field_value.clone()) {
+                    values.push(field_value.clone());
+                }
+            }
+        }
+        values
+    }
 }
 
 pub fn hash_value(value: &Value) -> u64 {

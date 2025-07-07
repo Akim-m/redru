@@ -236,11 +236,11 @@ impl InMemoryDB {
         Ok(())
     }
 
-    fn save_to_file(&self) -> io::Result<()> {
+    pub fn save_to_file(&self) -> io::Result<()> {
         if let Some(ref path) = self.persistence_file {
             self.create_backup(path)?;
 
-            let json_data = serde_json::to_string(&self.storage)
+            let json_data = serde_json::to_string_pretty(&self.storage)
                 .map_err(|e| {
                     io::Error::new(io::ErrorKind::InvalidData, format!("JSON serialization error: {}", e))
                 })?;
@@ -362,11 +362,9 @@ impl InMemoryDB {
                         if backup_hash_file.exists() {
                             if self.hash_index.verify_data_integrity(backup_filename, &data) {
                                 self.storage = data;
-                                
                                 for index_name in self.hash_index.list_indexes() {
                                     self.rebuild_index(&index_name);
                                 }
-                                
                                 self.save_to_file()?;
                                 return Ok(());
                             }
@@ -375,14 +373,201 @@ impl InMemoryDB {
                 }
             }
 
-            self.storage = HashMap::new();
-            
-            for index_name in self.hash_index.list_indexes() {
-                self.hash_index.clear_index(&index_name);
-            }
-            
-            self.save_to_file()?;
+            return Err(io::Error::new(io::ErrorKind::NotFound, "No valid backup found. Database was not modified."));
         }
         Ok(())
     }
+
+    pub fn persistence_file(&self) -> Option<&PathBuf> {
+        self.persistence_file.as_ref()
+    }
+
+    pub fn find_partial(&self, index_name: &str, field: &str, substring: &str) -> Vec<String> {
+        self.hash_index.find_partial(index_name, field, substring, &self.storage)
+    }
+
+    pub fn find_range(&self, index_name: &str, field: &str, min: f64, max: f64) -> Vec<String> {
+        self.hash_index.find_range(index_name, field, min, max, &self.storage)
+    }
+
+    pub fn find_multi(&self, index_name: &str, field_values: &[(String, Value)]) -> Vec<String> {
+        self.hash_index.find_multi(index_name, field_values, &self.storage)
+    }
+
+    pub fn list_field_values(&self, index_name: &str, field: &str) -> Vec<Value> {
+        self.hash_index.list_field_values(index_name, field, &self.storage)
+    }
+
+    // Additional public methods for main.rs compatibility
+    pub fn save_to_file_with_path(&self, file_path: &str) -> io::Result<()> {
+        let path = PathBuf::from(file_path);
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        
+        let json_data = serde_json::to_string_pretty(&self.storage)
+            .map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("JSON serialization error: {}", e))
+            })?;
+
+        let temp_path = path.with_extension("tmp");
+        
+        {
+            let file = File::create(&temp_path)?;
+            let mut writer = BufWriter::new(file);
+            writer.write_all(json_data.as_bytes())?;
+            writer.flush()?;
+        }
+
+        fs::rename(&temp_path, &path).map_err(|e| {
+            let _ = fs::remove_file(&temp_path);
+            e
+        })?;
+
+        Ok(())
+    }
+
+    pub fn load_from_file_path(file_path: &str) -> io::Result<Self> {
+        let path = PathBuf::from(file_path);
+        let mut db = InMemoryDB::new();
+        
+        if !path.exists() {
+            return Ok(db);
+        }
+
+        let content = fs::read_to_string(&path)?;
+
+        if content.trim().is_empty() {
+            return Ok(db);
+        }
+
+        let data: HashMap<String, Value> = serde_json::from_str(&content)
+            .map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("JSON parsing error: {}", e))
+            })?;
+
+        db.storage = data;
+        Ok(db)
+    }
+
+    pub fn create_backup_with_path(&self, file_path: &str) -> io::Result<()> {
+        let path = PathBuf::from(file_path);
+        if !path.exists() {
+            return Ok(());
+        }
+
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let backup_path = path.with_extension(format!("backup.{}", timestamp));
+        fs::copy(&path, &backup_path)?;
+        Ok(())
+    }
+
+    pub fn restore_from_backup_path(&mut self, file_path: &str) -> io::Result<()> {
+        let path = PathBuf::from(file_path);
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let file_stem = path.file_stem().unwrap_or_default().to_string_lossy();
+        
+        let mut backup_files: Vec<_> = fs::read_dir(parent)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry.file_name().to_string_lossy().starts_with(&format!("{}.backup.", file_stem))
+            })
+            .collect();
+
+        backup_files.sort_by_key(|entry| {
+            entry.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH)
+        });
+        backup_files.reverse();
+
+        for backup_entry in backup_files {
+            let backup_path = backup_entry.path();
+            
+            if let Ok(content) = fs::read_to_string(&backup_path) {
+                if let Ok(data) = serde_json::from_str::<HashMap<String, Value>>(&content) {
+                    self.storage = data;
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(io::Error::new(io::ErrorKind::NotFound, "No valid backup found"))
+    }
+
+    pub fn repair_corrupted_database(&mut self, file_path: &str) -> io::Result<()> {
+        self.restore_from_backup_path(file_path)
+    }
+
+    pub fn get_statistics(&self) -> DatabaseStats {
+        let total_records = self.storage.len();
+        let total_size = serde_json::to_string(&self.storage)
+            .map(|s| s.len())
+            .unwrap_or(0);
+        let average_record_size = if total_records > 0 {
+            total_size as f64 / total_records as f64
+        } else {
+            0.0
+        };
+        let last_modified = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .to_string();
+
+        DatabaseStats {
+            total_records,
+            total_size,
+            average_record_size,
+            last_modified,
+        }
+    }
+
+    pub fn enable_auto_save(&mut self) {
+        self.auto_save = true;
+    }
+
+    pub fn disable_auto_save(&mut self) {
+        self.auto_save = false;
+    }
+
+    pub fn add(&mut self, key: &str, value: Value) {
+        self.storage.insert(key.to_string(), value);
+    }
+
+    pub fn delete_key(&mut self, key: &str) -> bool {
+        self.storage.remove(key).is_some()
+    }
+
+    pub fn list_keys(&self) -> Vec<String> {
+        self.storage.keys().cloned().collect()
+    }
+
+    pub fn search_by_field(&self, field: &str, value: &str) -> Vec<String> {
+        let mut results = Vec::new();
+        for (key, val) in &self.storage {
+            if let Some(field_value) = val.get(field) {
+                if field_value.to_string() == value {
+                    results.push(key.clone());
+                }
+            }
+        }
+        results
+    }
+
+    pub fn get_all_data(&self) -> &HashMap<String, Value> {
+        &self.storage
+    }
+}
+
+#[derive(Debug)]
+pub struct DatabaseStats {
+    pub total_records: usize,
+    pub total_size: usize,
+    pub average_record_size: f64,
+    pub last_modified: String,
 }

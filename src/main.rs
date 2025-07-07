@@ -1,591 +1,631 @@
 mod db;
 mod hash_index;
+mod tests;
+mod vector_db;
+mod image_processor;
+mod password_manager;
 
-
-use db::InMemoryDB;
-use serde_json::{Value, json};
 use std::io::{self, Write};
-use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use db::InMemoryDB;
+use hash_index::HashIndex;
+use vector_db::run_vector_processing;
+use image_processor::run_image_processing;
+use password_manager::PasswordManager;
 
-struct DatabaseShell {
-    db: InMemoryDB,
-    running: bool,
+fn main() -> io::Result<()> {
+    let mut password_manager = PasswordManager::new()?;
+    
+    // Check if master password is set
+    if !password_manager.is_master_password_set() {
+        println!("🔐 Welcome to Geng Database Shell!");
+        println!("No master password is set. Would you like to set one? (y/n): ");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        
+        if input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes" {
+            password_manager.set_master_password()?;
+        }
+    } else {
+        // Verify master password
+        if !password_manager.verify_master_password()? {
+            println!("❌ Access denied. Exiting.");
+            return Ok(());
+        }
+    }
+    
+    loop {
+        println!("\nSession options:");
+        println!("  1. Use existing session");
+        println!("  2. Create new session");
+        println!("  3. Delete a session");
+        println!("  4. Simse (file-to-vector mode)");
+        println!("  5. Image (image processing mode)");
+        println!("  6. Password management");
+        println!("  7. Exit");
+        print!("Select option (1-7): ");
+        std::io::stdout().flush()?;
+        
+        let mut opt = String::new();
+        std::io::stdin().read_line(&mut opt)?;
+        
+        match opt.trim() {
+            "1" => use_existing_session(&mut password_manager)?,
+            "2" => create_new_session(&mut password_manager)?,
+            "3" => delete_session(&mut password_manager)?,
+            "4" => {
+                if password_manager.verify_master_password()? {
+                    run_vector_processing()?;
+                }
+            }
+            "5" => {
+                if password_manager.verify_master_password()? {
+                    run_image_processing()?;
+                }
+            }
+            "6" => password_management_menu(&mut password_manager)?,
+            "7" => {
+                println!("Goodbye!");
+                break;
+            }
+            _ => println!("Invalid option."),
+        }
+    }
+    Ok(())
 }
 
-impl DatabaseShell {
-    fn new() -> io::Result<Self> {
-        let db = InMemoryDB::new_persistent("database.json")?;
-        Ok(DatabaseShell {
-            db,
-            running: true,
-        })
+fn use_existing_session(password_manager: &mut PasswordManager) -> io::Result<()> {
+    let sessions = get_available_sessions()?;
+    if sessions.is_empty() {
+        println!("No sessions found.");
+        return Ok(());
     }
-
-    fn run(&mut self) -> io::Result<()> {
-        self.print_welcome();
-        
-        while self.running {
-            self.print_prompt();
-            let input = self.read_input()?;
-            self.execute_command(&input)?;
-        }
-        
-        Ok(())
+    
+    println!("Available sessions:");
+    for (i, session) in sessions.iter().enumerate() {
+        let protected = password_manager.list_protected_sessions().contains(session);
+        let status = if protected { "🔒" } else { "🔓" };
+        println!("  {}. {} {}", i + 1, status, session);
     }
-
-    fn print_welcome(&mut self) {
-        println!("🗄️  Interactive Database System with Hash Indexing");
-        println!("═══════════════════════════════════════════════════");
-        println!("Type 'help' for available commands");
-        println!("Database entries: {}", self.db.len());
-        println!("Active indexes: {}\n", self.db.list_indexes().len());
-    }
-
-    fn print_prompt(&self) {
-        print!("db> ");
-        io::stdout().flush().unwrap();
-    }
-
-    fn read_input(&self) -> io::Result<String> {
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        Ok(input.trim().to_string())
-    }
-
-    fn execute_command(&mut self, input: &str) -> io::Result<()> {
-        let parts: Vec<&str> = input.split_whitespace().collect();
-        
-        if parts.is_empty() {
-            return Ok(());
-        }
-
-        match parts[0].to_lowercase().as_str() {
-            "help" => self.show_help(),
-            "set" => self.handle_set(&parts[1..])?,
-            "get" => self.handle_get(&parts[1..]),
-            "del" | "delete" => self.handle_delete(&parts[1..])?,
-            "update" => self.handle_update(&parts[1..])?,
-            "exists" => self.handle_exists(&parts[1..]),
-            "keys" => self.handle_keys(),
-            "count" | "len" => self.handle_count(),
-            "clear" => self.handle_clear()?,
-            "save" => self.handle_save()?,
-            "reload" => self.handle_reload()?,
-            "backup" => self.handle_backup(),
-            "status" => self.handle_status(),
-            "search" => self.handle_search(&parts[1..]),
-            "export" => self.handle_export(&parts[1..])?,
-            "import" => self.handle_import(&parts[1..])?,
-            "create_index" => self.handle_create_index(&parts[1..]),
-            "drop_index" => self.handle_drop_index(&parts[1..]),
-            "list_indexes" => self.handle_list_indexes(),
-            "index_stats" => self.handle_index_stats(&parts[1..]),
-            "find_by_value" => self.handle_find_by_value(&parts[1..]),
-            "find_by_hash" => self.handle_find_by_hash(&parts[1..]),
-            "find_by_field" => self.handle_find_by_field(&parts[1..]),
-            "rebuild_index" => self.handle_rebuild_index(&parts[1..]),
-            "verify_integrity" => self.handle_verify_integrity(),
-            "validate_file" => self.handle_validate_file()?,
-            "repair_file" => self.handle_repair_file()?,
-            "quit" | "exit" => self.handle_quit(),
-            _ => println!("❌ Unknown command: '{}'. Type 'help' for available commands.", parts[0]),
-        }
-        
-        Ok(())
-    }
-
-    fn show_help(&self) {
-        println!("\n📋 Database Commands:");
-        println!("  set <key> <value>     - Store a value");
-        println!("  get <key>             - Retrieve a value");
-        println!("  update <key> <value>  - Update existing value");
-        println!("  delete <key>          - Delete a key-value pair");
-        println!("  exists <key>          - Check if key exists");
-        println!("  keys                  - List all keys");
-        println!("  count                 - Show number of entries");
-        println!("  clear                 - Delete all data");
-        println!("  search <pattern>      - Search keys containing pattern");
-        
-        println!("\n🔍 Index Commands:");
-        println!("  create_index <name>   - Create a new hash index");
-        println!("  drop_index <name>     - Drop an existing index");
-        println!("  list_indexes          - Show all indexes");
-        println!("  index_stats <name>    - Show index statistics");
-        println!("  rebuild_index <name>  - Rebuild an index");
-        println!("  find_by_value <index> <value> - Find keys by exact value match");
-        println!("  find_by_hash <index> <hash>   - Find keys by hash value");
-        println!("  find_by_field <index> <field> <value> - Find by nested field");
-        
-        println!("\n🔒 Integrity & Security Commands:");
-        println!("  verify_integrity      - Verify data integrity using hashes");
-        println!("  validate_file         - Validate persistence file integrity");
-        println!("  repair_file           - Repair corrupted file from backup");
-        
-        println!("\n💾 System Commands:");
-        println!("  save                  - Manually save to disk");
-        println!("  reload                - Reload from disk");
-        println!("  export <file>         - Export data to JSON file");
-        println!("  import <file>         - Import data from JSON file");
-        println!("  status                - Show database status");
-        println!("  backup                - Show backup information");
-        println!("  help                  - Show this help");
-        println!("  quit/exit             - Exit the program\n");
-    }
-
-    fn handle_set(&mut self, args: &[&str]) -> io::Result<()> {
-        if args.len() < 2 {
-            println!("❌ Usage: set <key> <value>");
-            return Ok(());
-        }
-
-        let key = args[0];
-        let value_str = args[1..].join(" ");
-        
-        let value = self.parse_value(&value_str);
-        self.db.insert(key, value)?;
-        println!("✅ Set '{}' = '{}'", key, value_str);
-        Ok(())
-    }
-
-    fn handle_get(&self, args: &[&str]) {
-        if args.is_empty() {
-            println!("❌ Usage: get <key>");
-            return;
-        }
-
-        let key = args[0];
-        match self.db.get(key) {
-            Some(value) => println!("📄 '{}' = {}", key, self.format_value(value)),
-            None => println!("❌ Key '{}' not found", key),
-        }
-    }
-
-    fn handle_delete(&mut self, args: &[&str]) -> io::Result<()> {
-        if args.is_empty() {
-            println!("❌ Usage: delete <key>");
-            return Ok(());
-        }
-
-        let key = args[0];
-        if self.db.exists(key) {
-            self.db.delete(key)?;
-            println!("✅ Deleted '{}'", key);
-        } else {
-            println!("❌ Key '{}' not found", key);
-        }
-        Ok(())
-    }
-
-    fn handle_update(&mut self, args: &[&str]) -> io::Result<()> {
-        if args.len() < 2 {
-            println!("❌ Usage: update <key> <value>");
-            return Ok(());
-        }
-
-        let key = args[0];
-        let value_str = args[1..].join(" ");
-        let value = self.parse_value(&value_str);
-        
-        if self.db.update(key, value)? {
-            println!("✅ Updated '{}' = '{}'", key, value_str);
-        } else {
-            println!("❌ Key '{}' not found", key);
-        }
-        Ok(())
-    }
-
-    fn handle_exists(&self, args: &[&str]) {
-        if args.is_empty() {
-            println!("❌ Usage: exists <key>");
-            return;
-        }
-
-        let key = args[0];
-        if self.db.exists(key) {
-            println!("✅ Key '{}' exists", key);
-        } else {
-            println!("❌ Key '{}' does not exist", key);
-        }
-    }
-
-    fn handle_keys(&self) {
-        let keys = self.db.keys();
-        if keys.is_empty() {
-            println!("📭 No keys found");
-        } else {
-            println!("🔑 Keys ({}):", keys.len());
-            for (i, key) in keys.iter().enumerate() {
-                println!("  {}. {}", i + 1, key);
-            }
-        }
-    }
-
-    fn handle_count(&self) {
-        println!("📊 Total entries: {}", self.db.len());
-    }
-
-    fn handle_clear(&mut self) -> io::Result<()> {
-        print!("⚠️  Are you sure you want to delete all data? (y/N): ");
-        io::stdout().flush().unwrap();
-        
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        
-        if input.trim().to_lowercase() == "y" {
-            self.db.clear()?;
-            println!("✅ All data cleared");
-        } else {
-            println!("❌ Operation cancelled");
-        }
-        Ok(())
-    }
-
-    fn handle_save(&self) -> io::Result<()> {
-        self.db.save()?;
-        println!("✅ Data saved to disk");
-        Ok(())
-    }
-
-    fn handle_reload(&mut self) -> io::Result<()> {
-        self.db.reload()?;
-        println!("✅ Data reloaded from disk");
-        Ok(())
-    }
-
-    fn handle_backup(&self) {
-        println!("💾 Backup system is enabled");
-        println!("   Backups are created automatically on save");
-        println!("   Hash verification ensures data integrity");
-    }
-
-    fn handle_status(&mut self) {
-        println!("📊 Database Status:");
-        println!("   Entries: {}", self.db.len());
-        println!("   Empty: {}", if self.db.is_empty() { "Yes" } else { "No" });
-        println!("   Persistence: Enabled");
-        println!("   Auto-save: Enabled");
-        println!("   Backup: Enabled");
-        println!("   Active indexes: {}", self.db.list_indexes().len());
-        
-        // Check data integrity
-        let integrity_status = if self.db.verify_data_integrity() {
-            "✅ Valid"
-        } else {
-            "❌ Corrupted"
-        };
-        println!("   Data integrity: {}", integrity_status);
-        
-        if !self.db.list_indexes().is_empty() {
-            println!("   Indexes:");
-            for index_name in self.db.list_indexes() {
-                if let Some((unique_hashes, total_entries)) = self.db.get_index_stats(&index_name) {
-                    println!("     {}: {} unique hashes, {} total entries", 
-                           index_name, unique_hashes, total_entries);
+    
+    print!("Select session (1-{}): ", sessions.len());
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    
+    if let Ok(index) = input.trim().parse::<usize>() {
+        if index > 0 && index <= sessions.len() {
+            let session_name = &sessions[index - 1];
+            
+            // Check if session is password protected
+            if password_manager.list_protected_sessions().contains(session_name) {
+                if !password_manager.verify_session_password(session_name)? {
+                    println!("❌ Access denied to session '{}'", session_name);
+                    return Ok(());
                 }
             }
-        }
-    }
-
-    fn handle_search(&self, args: &[&str]) {
-        if args.is_empty() {
-            println!("❌ Usage: search <pattern>");
-            return;
-        }
-
-        let pattern = args[0].to_lowercase();
-        let keys = self.db.keys();
-        let matches: Vec<_> = keys.iter()
-            .filter(|key| key.to_lowercase().contains(&pattern))
-            .collect();
-
-        if matches.is_empty() {
-            println!("❌ No keys found matching pattern '{}'", pattern);
+            
+            run_session(session_name)?;
         } else {
-            println!("🔍 Found {} matches for '{}':", matches.len(), pattern);
-            for key in matches {
-                if let Some(value) = self.db.get(key) {
-                    println!("  {} = {}", key, self.format_value(value));
+            println!("Invalid session number.");
+        }
+    } else {
+        println!("Invalid input.");
+    }
+    Ok(())
+}
+
+fn create_new_session(password_manager: &mut PasswordManager) -> io::Result<()> {
+    print!("Enter session name: ");
+    std::io::stdout().flush()?;
+    let mut session_name = String::new();
+    std::io::stdin().read_line(&mut session_name)?;
+    let session_name = session_name.trim();
+    
+    if session_name.is_empty() {
+        println!("Session name cannot be empty.");
+        return Ok(());
+    }
+    
+    // Check if session already exists
+    let sessions = get_available_sessions()?;
+    if sessions.contains(&session_name.to_string()) {
+        println!("Session '{}' already exists.", session_name);
+        return Ok(());
+    }
+    
+    // Ask if user wants to password protect this session
+    print!("Do you want to password protect this session? (y/n): ");
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    
+    if input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes" {
+        password_manager.set_session_password(session_name)?;
+    }
+    
+    // Create session directory
+    let session_dir = format!("sessions/{}", session_name);
+    fs::create_dir_all(&session_dir)?;
+    
+    // Create initial database file
+    let db_file = format!("{}/database.json", session_dir);
+    let db = InMemoryDB::new();
+    db.save_to_file_with_path(&db_file)?;
+    
+    println!("✅ Session '{}' created successfully!", session_name);
+    Ok(())
+}
+
+fn delete_session(password_manager: &mut PasswordManager) -> io::Result<()> {
+    let sessions = get_available_sessions()?;
+    if sessions.is_empty() {
+        println!("No sessions found.");
+        return Ok(());
+    }
+    
+    println!("Available sessions:");
+    for (i, session) in sessions.iter().enumerate() {
+        let protected = password_manager.list_protected_sessions().contains(session);
+        let status = if protected { "🔒" } else { "🔓" };
+        println!("  {}. {} {}", i + 1, status, session);
+    }
+    
+    print!("Select session to delete (1-{}): ", sessions.len());
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    
+    if let Ok(index) = input.trim().parse::<usize>() {
+        if index > 0 && index <= sessions.len() {
+            let session_name = &sessions[index - 1];
+            
+            // Check if session is password protected
+            if password_manager.list_protected_sessions().contains(session_name) {
+                if !password_manager.verify_session_password(session_name)? {
+                    println!("❌ Access denied to session '{}'", session_name);
+                    return Ok(());
                 }
             }
-        }
-    }
-
-    fn handle_create_index(&mut self, args: &[&str]) {
-        if args.is_empty() {
-            println!("❌ Usage: create_index <index_name>");
-            return;
-        }
-
-        let index_name = args[0];
-        self.db.create_index(index_name);
-        println!("✅ Created index '{}'", index_name);
-    }
-
-    fn handle_drop_index(&mut self, args: &[&str]) {
-        if args.is_empty() {
-            println!("❌ Usage: drop_index <index_name>");
-            return;
-        }
-
-        let index_name = args[0];
-        self.db.drop_index(index_name);
-        println!("✅ Dropped index '{}'", index_name);
-    }
-
-    fn handle_list_indexes(&mut self) {
-        let indexes = self.db.list_indexes();
-        if indexes.is_empty() {
-            println!("📭 No indexes found");
-        } else {
-            println!("🔍 Active indexes ({}):", indexes.len());
-            for (i, index_name) in indexes.iter().enumerate() {
-                if let Some((unique_hashes, total_entries)) = self.db.get_index_stats(index_name) {
-                    println!("  {}. {} ({} unique hashes, {} entries)", 
-                           i + 1, index_name, unique_hashes, total_entries);
-                } else {
-                    println!("  {}. {}", i + 1, index_name);
+            
+            print!("Are you sure you want to delete session '{}'? (yes/no): ", session_name);
+            std::io::stdout().flush()?;
+            let mut confirm = String::new();
+            std::io::stdin().read_line(&mut confirm)?;
+            
+            if confirm.trim().to_lowercase() == "yes" {
+                let session_dir = format!("sessions/{}", session_name);
+                if Path::new(&session_dir).exists() {
+                    fs::remove_dir_all(&session_dir)?;
                 }
-            }
-        }
-    }
-
-    fn handle_index_stats(&self, args: &[&str]) {
-        if args.is_empty() {
-            println!("❌ Usage: index_stats <index_name>");
-            return;
-        }
-
-        let index_name = args[0];
-        if let Some((unique_hashes, total_entries)) = self.db.get_index_stats(index_name) {
-            println!("📊 Index '{}' statistics:", index_name);
-            println!("   Unique hash values: {}", unique_hashes);
-            println!("   Total indexed entries: {}", total_entries);
-            if unique_hashes > 0 {
-                let avg_entries = total_entries as f64 / unique_hashes as f64;
-                println!("   Average entries per hash: {:.2}", avg_entries);
-            }
-        } else {
-            println!("❌ Index '{}' not found", index_name);
-        }
-    }
-
-    fn handle_find_by_value(&self, args: &[&str]) {
-        if args.len() < 2 {
-            println!("❌ Usage: find_by_value <index_name> <value>");
-            return;
-        }
-
-        let index_name = args[0];
-        let value_str = args[1..].join(" ");
-        let value = self.parse_value(&value_str);
-        
-        let results = self.db.find_by_value(index_name, &value);
-        if results.is_empty() {
-            println!("❌ No entries found for value '{}' in index '{}'", value_str, index_name);
-        } else {
-            println!("🔍 Found {} matches in index '{}':", results.len(), index_name);
-            for key in results {
-                if let Some(stored_value) = self.db.get(&key) {
-                    println!("  {} = {}", key, self.format_value(stored_value));
-                }
-            }
-        }
-    }
-
-    fn handle_find_by_hash(&self, args: &[&str]) {
-        if args.len() < 2 {
-            println!("❌ Usage: find_by_hash <index_name> <hash_value>");
-            return;
-        }
-
-        let index_name = args[0];
-        let hash_str = args[1];
-        
-        if let Ok(hash) = hash_str.parse::<u64>() {
-            let results = self.db.find_by_hash(index_name, hash);
-            if results.is_empty() {
-                println!("❌ No entries found for hash {} in index '{}'", hash, index_name);
+                password_manager.remove_session_password(session_name)?;
+                println!("✅ Session '{}' deleted successfully!", session_name);
             } else {
-                println!("🔍 Found {} matches for hash {} in index '{}':", results.len(), hash, index_name);
-                for key in results {
-                    if let Some(value) = self.db.get(&key) {
-                        println!("  {} = {}", key, self.format_value(value));
+                println!("Session deletion cancelled.");
+            }
+        } else {
+            println!("Invalid session number.");
+        }
+    } else {
+        println!("Invalid input.");
+    }
+    Ok(())
+}
+
+fn password_management_menu(password_manager: &mut PasswordManager) -> io::Result<()> {
+    loop {
+        println!("\n🔐 Password Management:");
+        println!("  1. Set/Change master password");
+        println!("  2. Set session password");
+        println!("  3. Remove session password");
+        println!("  4. List protected sessions");
+        println!("  5. Reset all passwords");
+        println!("  6. Back to main menu");
+        print!("Select option (1-6): ");
+        std::io::stdout().flush()?;
+        
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        
+        match input.trim() {
+            "1" => {
+                if password_manager.is_master_password_set() {
+                    password_manager.change_master_password()?;
+                } else {
+                    password_manager.set_master_password()?;
+                }
+            }
+            "2" => {
+                let sessions = get_available_sessions()?;
+                if sessions.is_empty() {
+                    println!("No sessions found.");
+                    continue;
+                }
+                
+                println!("Available sessions:");
+                for (i, session) in sessions.iter().enumerate() {
+                    let protected = password_manager.list_protected_sessions().contains(session);
+                    let status = if protected { "🔒" } else { "🔓" };
+                    println!("  {}. {} {}", i + 1, status, session);
+                }
+                
+                print!("Select session (1-{}): ", sessions.len());
+                std::io::stdout().flush()?;
+                let mut session_input = String::new();
+                std::io::stdin().read_line(&mut session_input)?;
+                
+                if let Ok(index) = session_input.trim().parse::<usize>() {
+                    if index > 0 && index <= sessions.len() {
+                        let session_name = &sessions[index - 1];
+                        password_manager.set_session_password(session_name)?;
                     }
                 }
             }
-        } else {
-            println!("❌ Invalid hash value: {}", hash_str);
-        }
-    }
-
-    fn handle_find_by_field(&self, args: &[&str]) {
-        if args.len() < 3 {
-            println!("❌ Usage: find_by_field <index_name> <field_path> <value>");
-            println!("   Example: find_by_field user_index name.first John");
-            return;
-        }
-
-        let index_name = args[0];
-        let field_path = args[1];
-        let value_str = args[2..].join(" ");
-        let value = self.parse_value(&value_str);
-        
-        let results = self.db.find_by_field(index_name, field_path, &value);
-        if results.is_empty() {
-            println!("❌ No entries found for field '{}' = '{}' in index '{}'", 
-                   field_path, value_str, index_name);
-        } else {
-            println!("🔍 Found {} matches for field '{}' = '{}' in index '{}':", 
-                   results.len(), field_path, value_str, index_name);
-            for key in results {
-                if let Some(stored_value) = self.db.get(&key) {
-                    println!("  {} = {}", key, self.format_value(stored_value));
+            "3" => {
+                let protected_sessions = password_manager.list_protected_sessions();
+                if protected_sessions.is_empty() {
+                    println!("No protected sessions found.");
+                    continue;
+                }
+                
+                println!("Protected sessions:");
+                for (i, session) in protected_sessions.iter().enumerate() {
+                    println!("  {}. {}", i + 1, session);
+                }
+                
+                print!("Select session (1-{}): ", protected_sessions.len());
+                std::io::stdout().flush()?;
+                let mut session_input = String::new();
+                std::io::stdin().read_line(&mut session_input)?;
+                
+                if let Ok(index) = session_input.trim().parse::<usize>() {
+                    if index > 0 && index <= protected_sessions.len() {
+                        let session_name = &protected_sessions[index - 1];
+                        password_manager.remove_session_password(session_name)?;
+                    }
                 }
             }
-        }
-    }
-
-    fn handle_rebuild_index(&mut self, args: &[&str]) {
-        if args.is_empty() {
-            println!("❌ Usage: rebuild_index <index_name>");
-            return;
-        }
-
-        let index_name = args[0];
-        self.db.rebuild_index(index_name);
-        println!("✅ Rebuilt index '{}'", index_name);
-    }
-
-    fn handle_verify_integrity(&self) {
-        println!("🔒 Verifying data integrity...");
-        
-        if self.db.verify_data_integrity() {
-            println!("✅ Data integrity verification passed");
-            println!("   All data hashes match expected values");
-        } else {
-            println!("❌ Data integrity verification failed");
-            println!("   Data may have been corrupted or tampered with");
-            println!("   Consider running 'repair_file' to restore from backup");
-        }
-    }
-
-    fn handle_validate_file(&self) -> io::Result<()> {
-        println!("🔍 Validating persistence file...");
-        
-        match self.db.validate_file_integrity() {
-            Ok(true) => {
-                println!("✅ File validation passed");
-                println!("   Persistence file is valid and uncorrupted");
+            "4" => {
+                let protected_sessions = password_manager.list_protected_sessions();
+                if protected_sessions.is_empty() {
+                    println!("No protected sessions found.");
+                } else {
+                    println!("Protected sessions:");
+                    for session in protected_sessions {
+                        println!("  🔒 {}", session);
+                    }
+                }
             }
-            Ok(false) => {
-                println!("❌ File validation failed");
-                println!("   Persistence file is corrupted or invalid");
-                println!("   Consider running 'repair_file' to restore from backup");
+            "5" => {
+                password_manager.reset_all_passwords()?;
             }
-            Err(e) => {
-                println!("❌ Error during file validation: {}", e);
-            }
-        }
-        
-        Ok(())
-    }
-
-    fn handle_repair_file(&mut self) -> io::Result<()> {
-        println!("🔧 Attempting to repair database from backup...");
-        
-        match self.db.repair_file() {
-            Ok(()) => {
-                println!("✅ Database repair completed");
-                println!("   Data has been restored from the most recent valid backup");
-                println!("   Current entries: {}", self.db.len());
-            }
-            Err(e) => {
-                println!("❌ Database repair failed: {}", e);
-                println!("   No valid backups found or all backups are corrupted");
-            }
-        }
-        
-        Ok(())
-    }
-
-    fn handle_export(&self, args: &[&str]) -> io::Result<()> {
-        if args.is_empty() {
-            println!("❌ Usage: export <filename>");
-            return Ok(());
-        }
-
-        let filename = args[0];
-        let keys = self.db.keys();
-        let mut data = HashMap::new();
-        
-        for key in keys {
-            if let Some(value) = self.db.get(&key) {
-                data.insert(key, value.clone());
-            }
-        }
-
-        let json_data = serde_json::to_string_pretty(&data)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        
-        std::fs::write(filename, json_data)?;
-        println!("✅ Exported {} entries to '{}'", data.len(), filename);
-        Ok(())
-    }
-
-    fn handle_import(&mut self, args: &[&str]) -> io::Result<()> {
-        if args.is_empty() {
-            println!("❌ Usage: import <filename>");
-            return Ok(());
-        }
-
-        let filename = args[0];
-        let content = std::fs::read_to_string(filename)?;
-        let data: HashMap<String, Value> = serde_json::from_str(&content)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-        let mut count = 0;
-        for (key, value) in data {
-            self.db.insert(&key, value)?;
-            count += 1;
-        }
-
-        println!("✅ Imported {} entries from '{}'", count, filename);
-        Ok(())
-    }
-
-    fn handle_quit(&mut self) {
-        println!("👋 Goodbye!");
-        self.running = false;
-    }
-
-    fn parse_value(&self, value_str: &str) -> Value {
-        if value_str.starts_with('{') || value_str.starts_with('[') {
-            serde_json::from_str(value_str).unwrap_or_else(|_| json!(value_str))
-        } else if let Ok(num) = value_str.parse::<i64>() {
-            json!(num)
-        } else if let Ok(float) = value_str.parse::<f64>() {
-            json!(float)
-        } else if value_str == "true" || value_str == "false" {
-            json!(value_str == "true")
-        } else {
-            json!(value_str)
+            "6" => break,
+            _ => println!("Invalid option."),
         }
     }
-
-    fn format_value(&self, value: &Value) -> String {
-        match value {
-            Value::String(s) => format!("\"{}\"", s),
-            Value::Number(n) => n.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Array(_) | Value::Object(_) => serde_json::to_string_pretty(value).unwrap_or_else(|_| "Invalid JSON".to_string()),
-            Value::Null => "null".to_string(),
-        }
-    }
+    Ok(())
 }
 
-fn main() -> io::Result<()> {
-
-
-    let mut shell = DatabaseShell::new()?;
-    shell.run()
+fn get_available_sessions() -> io::Result<Vec<String>> {
+    let sessions_dir = "sessions";
+    if !Path::new(sessions_dir).exists() {
+        return Ok(Vec::new());
+    }
+    
+    let sessions: Vec<String> = fs::read_dir(sessions_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    
+    Ok(sessions)
 }
+
+fn run_session(session_name: &str) -> io::Result<()> {
+    let db_file = format!("sessions/{}/database.json", session_name);
+    let mut db = InMemoryDB::load_from_file_path(&db_file)?;
+    let mut hash_index = HashIndex::new();
+    
+    println!("🔓 Session '{}' loaded. Type 'help' for commands.", session_name);
+    
+    let mut command_history: Vec<String> = Vec::new();
+    let mut history_index = 0;
+    
+    loop {
+        print!("{}> ", session_name);
+        std::io::stdout().flush()?;
+        
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+        
+        if input.is_empty() {
+            continue;
+        }
+        
+        // Add to command history
+        command_history.push(input.to_string());
+        history_index = command_history.len();
+        
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+        
+        match parts[0] {
+            "help" => {
+                println!("Available commands:");
+                println!("  add <key> <json_data>     - Add data to database");
+                println!("  get <key>                 - Get data by key");
+                println!("  delete <key>              - Delete data by key");
+                println!("  list                      - List all keys");
+                println!("  search <field> <value>    - Search by field value");
+                println!("  index <field>             - Create index on field");
+                println!("  find <index> <field> <value> - Find using index");
+                println!("  partial <index> <field> <substring> - Partial match search");
+                println!("  range <index> <field> <min> <max> - Range search");
+                println!("  multi <index> <field1> <value1> [field2 value2...] - Multi-field search");
+                println!("  values <index> <field>    - List all values for field");
+                println!("  save                      - Save database");
+                println!("  backup                    - Create backup");
+                println!("  restore                   - Restore from backup");
+                println!("  repair                    - Repair corrupted database");
+                println!("  stats                     - Show database statistics");
+                println!("  auto-save <on|off>        - Toggle auto-save");
+                println!("  history                   - Show command history");
+                println!("  clear                     - Clear screen");
+                println!("  test                      - Run database tests");
+                println!("  exit                      - Exit session");
+            }
+            "add" => {
+                if parts.len() < 3 {
+                    println!("Usage: add <key> <json_data>");
+                    continue;
+                }
+                let key = parts[1];
+                let json_data = parts[2..].join(" ");
+                match serde_json::from_str(&json_data) {
+                    Ok(data) => {
+                        db.add(key, data);
+                        println!("✅ Data added successfully!");
+                    }
+                    Err(e) => println!("❌ Invalid JSON: {}", e),
+                }
+            }
+            "get" => {
+                if parts.len() != 2 {
+                    println!("Usage: get <key>");
+                    continue;
+                }
+                match db.get(parts[1]) {
+                    Some(data) => println!("{}", serde_json::to_string_pretty(&data).unwrap()),
+                    None => println!("❌ Key not found"),
+                }
+            }
+            "delete" => {
+                if parts.len() != 2 {
+                    println!("Usage: delete <key>");
+                    continue;
+                }
+                if db.delete_key(parts[1]) {
+                    println!("✅ Data deleted successfully!");
+                } else {
+                    println!("❌ Key not found");
+                }
+            }
+            "list" => {
+                let keys = db.list_keys();
+                if keys.is_empty() {
+                    println!("No data found.");
+                } else {
+                    println!("Keys:");
+                    for key in keys {
+                        println!("  {}", key);
+                    }
+                }
+            }
+            "search" => {
+                if parts.len() < 3 {
+                    println!("Usage: search <field> <value>");
+                    continue;
+                }
+                let field = parts[1];
+                let value = parts[2..].join(" ");
+                let results = db.search_by_field(field, &value);
+                if results.is_empty() {
+                    println!("No matches found.");
+                } else {
+                    println!("Found {} matches:", results.len());
+                    for key in results {
+                        println!("  {}", key);
+                    }
+                }
+            }
+            "index" => {
+                if parts.len() != 2 {
+                    println!("Usage: index <field>");
+                    continue;
+                }
+                hash_index.create_index(parts[1]);
+                println!("✅ Index created successfully!");
+            }
+            "find" => {
+                if parts.len() < 4 {
+                    println!("Usage: find <index> <field> <value>");
+                    continue;
+                }
+                let index_name = parts[1];
+                let field = parts[2];
+                let value = parts[3..].join(" ");
+                let value_json = serde_json::Value::String(value);
+                let results = hash_index.find_by_value(index_name, &value_json);
+                if results.is_empty() {
+                    println!("No matches found.");
+                } else {
+                    println!("Found {} matches:", results.len());
+                    for key in results {
+                        println!("  {}", key);
+                    }
+                }
+            }
+            "partial" => {
+                if parts.len() < 4 {
+                    println!("Usage: partial <index> <field> <substring>");
+                    continue;
+                }
+                let index_name = parts[1];
+                let field = parts[2];
+                let substring = parts[3..].join(" ");
+                let results = hash_index.find_partial(index_name, field, &substring, &db.get_all_data());
+                if results.is_empty() {
+                    println!("No matches found.");
+                } else {
+                    println!("Found {} matches:", results.len());
+                    for key in results {
+                        println!("  {}", key);
+                    }
+                }
+            }
+            "range" => {
+                if parts.len() != 5 {
+                    println!("Usage: range <index> <field> <min> <max>");
+                    continue;
+                }
+                let index_name = parts[1];
+                let field = parts[2];
+                if let (Ok(min), Ok(max)) = (parts[3].parse::<f64>(), parts[4].parse::<f64>()) {
+                    let results = hash_index.find_range(index_name, field, min, max, &db.get_all_data());
+                    if results.is_empty() {
+                        println!("No matches found.");
+                    } else {
+                        println!("Found {} matches:", results.len());
+                        for key in results {
+                            println!("  {}", key);
+                        }
+                    }
+                } else {
+                    println!("❌ Invalid min/max values");
+                }
+            }
+            "multi" => {
+                if parts.len() < 4 || parts.len() % 2 != 0 {
+                    println!("Usage: multi <index> <field1> <value1> [field2 value2...]");
+                    continue;
+                }
+                let index_name = parts[1];
+                let mut field_values = Vec::new();
+                for i in (2..parts.len()).step_by(2) {
+                    if i + 1 < parts.len() {
+                        field_values.push((parts[i].to_string(), serde_json::Value::String(parts[i + 1].to_string())));
+                    }
+                }
+                let results = hash_index.find_multi(index_name, &field_values, &db.get_all_data());
+                if results.is_empty() {
+                    println!("No matches found.");
+                } else {
+                    println!("Found {} matches:", results.len());
+                    for key in results {
+                        println!("  {}", key);
+                    }
+                }
+            }
+            "values" => {
+                if parts.len() != 3 {
+                    println!("Usage: values <index> <field>");
+                    continue;
+                }
+                let index_name = parts[1];
+                let field = parts[2];
+                let values = hash_index.list_field_values(index_name, field, &db.get_all_data());
+                if values.is_empty() {
+                    println!("No values found.");
+                } else {
+                    println!("Field values:");
+                    for value in values {
+                        println!("  {}", value);
+                    }
+                }
+            }
+            "save" => {
+                match db.save_to_file_with_path(&db_file) {
+                    Ok(_) => println!("✅ Database saved successfully!"),
+                    Err(e) => println!("❌ Failed to save: {}", e),
+                }
+            }
+            "backup" => {
+                match db.create_backup_with_path(&db_file) {
+                    Ok(_) => println!("✅ Backup created successfully!"),
+                    Err(e) => println!("❌ Failed to create backup: {}", e),
+                }
+            }
+            "restore" => {
+                match db.restore_from_backup_path(&db_file) {
+                    Ok(_) => println!("✅ Database restored successfully!"),
+                    Err(e) => println!("❌ Failed to restore: {}", e),
+                }
+            }
+            "repair" => {
+                match db.repair_corrupted_database(&db_file) {
+                    Ok(_) => println!("✅ Database repaired successfully!"),
+                    Err(e) => println!("❌ Failed to repair: {}", e),
+                }
+            }
+            "stats" => {
+                let stats = db.get_statistics();
+                println!("Database Statistics:");
+                println!("  Total records: {}", stats.total_records);
+                println!("  Total size: {} bytes", stats.total_size);
+                println!("  Average record size: {:.2} bytes", stats.average_record_size);
+                println!("  Last modified: {}", stats.last_modified);
+            }
+            "auto-save" => {
+                if parts.len() != 2 {
+                    println!("Usage: auto-save <on|off>");
+                    continue;
+                }
+                match parts[1] {
+                    "on" => {
+                        db.enable_auto_save();
+                        println!("✅ Auto-save enabled!");
+                    }
+                    "off" => {
+                        db.disable_auto_save();
+                        println!("✅ Auto-save disabled!");
+                    }
+                    _ => println!("Usage: auto-save <on|off>"),
+                }
+            }
+            "history" => {
+                if command_history.is_empty() {
+                    println!("No command history.");
+                } else {
+                    println!("Command History:");
+                    for (i, cmd) in command_history.iter().enumerate() {
+                        println!("  {}. {}", i + 1, cmd);
+                    }
+                }
+            }
+            "clear" => {
+                print!("\x1B[2J\x1B[1;1H"); // Clear screen
+            }
+            "test" => {
+                println!("Running database tests...");
+                match tests::run_tests() {
+                    Ok(_) => println!("✅ All tests passed!"),
+                    Err(e) => println!("❌ Tests failed: {}", e),
+                }
+            }
+            "exit" => {
+                println!("Saving database before exit...");
+                db.save_to_file_with_path(&db_file)?;
+                println!("Goodbye!");
+                break;
+            }
+            _ => {
+                println!("Unknown command. Type 'help' for available commands.");
+            }
+        }
+    }
+    Ok(())
+} 
