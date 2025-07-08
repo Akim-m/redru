@@ -7,6 +7,8 @@ A simple yet extensible in-memory key-value database written in Rust with:
 ✅ Automatic backup support
 ✅ Custom Hash Indexing for efficient lookups
 ✅ Interactive shell interface
+✅ Image operations
+✅ Vector Operations
 
 ---
 
@@ -20,13 +22,14 @@ A simple yet extensible in-memory key-value database written in Rust with:
 * Uses `serde_json` for flexible JSON value storage
 * Hash indexing powered by SHA-256
 * Simple and extensible design
+* and more ( Have more to add here)
 
 ---
 
 ## Requirements
 
-* Rust (Edition 2021 recommended)
-* Cargo (Rust package manager)
+* Rust 
+* Cargo 
 
 ---
 
@@ -96,17 +99,7 @@ Inside the interactive shell, you can use the following commands:
 > exit
 ```
 
----
 
-## Testing
-
-To run tests (if implemented):
-
-```
-cargo test
-```
-
----
 
 ## Future Improvements
 
